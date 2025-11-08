@@ -22,6 +22,12 @@ class VAEnn(nn.Module):
                                       nn.Linear(input_dim, hidden_dim),
                                       nn.LeakyReLU(0.2),
 
+                                      nn.Linear(hidden_dim, hidden_dim),
+                                      nn.LeakyReLU(0.2),
+
+                                      nn.Linear(hidden_dim, hidden_dim),
+                                      nn.LeakyReLU(0.2),
+
                                       nn.Linear(hidden_dim, latent_dim),
                                       nn.LeakyReLU(0.2) )
         
@@ -33,9 +39,15 @@ class VAEnn(nn.Module):
                                        
                                       nn.Linear(latent_dim, hidden_dim),
                                       nn.LeakyReLU(0.2),
+
+                                      nn.Linear(hidden_dim, hidden_dim),
+                                      nn.LeakyReLU(0.2),
+                                     
+                                      nn.Linear(hidden_dim, hidden_dim),
+                                      nn.LeakyReLU(0.2),
                                       
                                       nn.Linear(hidden_dim, input_dim),
-                                      nn.Sigmoid())
+                                      nn.Sigmoid() )
         
         self.classifier = nn.Sequential( nn.Linear(2, 10),
                                          nn.Softmax() )
@@ -98,14 +110,15 @@ class VAEnn(nn.Module):
         return train_loss, test_loss
 
 
-    def loss_fcn(self, model_input, decoder_output, mu, std, epoch):
+    def loss_fcn(self, model_input, decoder_output, mu, std,  classsif_output, label, epoch):
         model_input_flat = torch.flatten(model_input, start_dim=1)
         reproduction_loss = func.mse_loss(model_input_flat, decoder_output, reduction='mean')
         divergence_loss =  ( (std.pow(2)+mu.pow(2))/2 - torch.log(std) - 1/2 ).sum(1).mean()
+        classif_loss = func.cross_entropy(classsif_output, label)
 
-        beta = ((epoch+1)/110)**2
-        beta = 0.0001
-        combined_loss = reproduction_loss + beta*divergence_loss
+        beta = 0.001 * min(epoch/2, 10)
+        alpha = 2 * max(1/(0.5*epoch+1), 0.5)
+        combined_loss = reproduction_loss + beta*divergence_loss + alpha*classif_loss
 
         return combined_loss
 
@@ -116,9 +129,9 @@ class VAEnn(nn.Module):
 device = 'cpu'
 batch_size = 100
 input_dim = 784
-hidden_dim = 400
-latent_dim = 400
-epochs = 20
+hidden_dim = 100
+latent_dim = 100
+epochs = 50
 
 # Download MNIST and transofrm to tensors
 mnist_path = "./raw_mnist"
@@ -130,10 +143,10 @@ train_loader = DataLoader(mnist_train, batch_size=batch_size)
 test_loader = DataLoader(mnist_test, batch_size=batch_size)
 
 vae_model = VAEnn(input_dim, hidden_dim, latent_dim, device)
-optimizer = Adam(vae_model.parameters(), lr=1e-5)
+optimizer = Adam(vae_model.parameters(), lr=5e-5)
 
 train_loss, test_loss = vae_model.trainer(train_loader, test_loader, optimizer, epochs)
-span = torch.arange(start=-10, end=10, step=1)
+span = torch.arange(start=-3, end=3, step=0.2)
 span_size = len(span)
 grid = torch.cartesian_prod(span, span)
 
@@ -144,12 +157,13 @@ for idx, (mu_1, mu_2) in enumerate(grid):
     canvas[x_pos:x_pos+28, y_pos:y_pos+28] = image
 
 final_canvas = transformsV2.functional.to_pil_image(canvas)
+final_canvas.show()
 
 mu_1_list, mu_2_list, color= [], [], []
-digit_colors = {0: "black", 1: "black", 2: "tab:green", 3: "tab:red", 4: "tab:purple", \
-                5: "tab:brown", 6: "tab:pink", 7:"tab:gray", 8: "tab:olive", 9: "tab:cyan"}
+digit_colors = {0: "orange", 1: "black", 2: "tab:green", 3: "tab:red", 4: "tab:purple", \
+                5: "tab:brown", 6: "tab:pink", 7:"tab:gray", 8: "blue", 9: "tab:cyan"}
 for sample, label in mnist_train:
-    _, mu, _ = vae_model(sample)
+    _, mu, _, _ = vae_model(sample)
     mu_1, mu_2 =  mu[0][0].item(), mu[0][1].item()
     mu_1_list.append(mu_1)
     mu_2_list.append(mu_2)
@@ -157,7 +171,7 @@ for sample, label in mnist_train:
 
 
 plt.figure(figsize=(6,6))
-plt.scatter(mu_1_list, mu_2_list, c=color, s=2, alpha=0.5)
+plt.scatter(mu_1_list, mu_2_list, c=color, s=2, alpha=0.1)
 plt.xlabel("mu_1")
 plt.ylabel("mu_2")
 plt.title("VAE Latent Space")
