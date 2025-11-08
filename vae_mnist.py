@@ -7,6 +7,10 @@ from torch.optim import Adam
 from torch import nn
 import torch
 
+import matplotlib.pyplot as plt
+
+from PIL import Image
+
 
 # Define the VAE
 class VAEnn(nn.Module):
@@ -32,6 +36,10 @@ class VAEnn(nn.Module):
                                       
                                       nn.Linear(hidden_dim, input_dim),
                                       nn.Sigmoid())
+        
+        self.classifier = nn.Sequential( nn.Linear(2, 10),
+                                         nn.Softmax() )
+
 
     def forward(self, model_input):
 
@@ -40,22 +48,24 @@ class VAEnn(nn.Module):
         epsilon = torch.randn_like(mu)
         decoder_input = std*epsilon + mu
         decoder_output = self.decoder(decoder_input)
+        classif_output = self.classifier(decoder_input)
 
-        return decoder_output, mu, std
+        return decoder_output, mu, std, classif_output
     
     def image_regen(self, model_input):
 
-        model_output, _, _ = self.forward(model_input)
+        model_output, _, _, _ = self.forward(model_input)
         image = torch.unflatten(model_output, 1, (28, 28))
 
         return image
     
     def latent_regen(self, mu, std):
 
+        mu, std = torch.tensor([mu], dtype=torch.float32), torch.tensor([std], dtype=torch.float32)
         epsilon = torch.randn_like(mu)
         decoder_input = std*epsilon + mu
         decoder_output = self.decoder(decoder_input)
-        image = self.image_regen(decoder_output)
+        image = torch.unflatten(decoder_output, 1, (28, 28))
 
         return image 
 
@@ -69,8 +79,8 @@ class VAEnn(nn.Module):
             optimizer.zero_grad()
             epoch_train_loss = 0
             for batch_idx, (train_batch, label) in enumerate(train_loader):
-                decoder_output, mu, std = self.forward(train_batch)
-                loss = self.loss_fcn(train_batch, decoder_output, mu, std)
+                decoder_output, mu, std, classsif_output = self.forward(train_batch)
+                loss = self.loss_fcn(train_batch, decoder_output, mu, std, classsif_output, label, epoch)
                 loss.backward()
                 optimizer.step()
                 epoch_train_loss += loss
@@ -78,8 +88,8 @@ class VAEnn(nn.Module):
             self.eval()
             epoch_test_loss = 0
             for batch_idx, (test_batch, label) in enumerate(test_loader):
-                decoder_output, mu, std = self.forward(test_batch)
-                loss = self.loss_fcn(test_batch, decoder_output, mu, std)
+                decoder_output, mu, std, classsif_output = self.forward(test_batch)
+                loss = self.loss_fcn(test_batch, decoder_output, mu, std, classsif_output, label, epoch)
                 epoch_test_loss += loss
                 
             train_loss[epoch] = epoch_train_loss
@@ -88,12 +98,14 @@ class VAEnn(nn.Module):
         return train_loss, test_loss
 
 
-    def loss_fcn(self, model_input, decoder_output, mu, std):
+    def loss_fcn(self, model_input, decoder_output, mu, std, epoch):
         model_input_flat = torch.flatten(model_input, start_dim=1)
         reproduction_loss = func.mse_loss(model_input_flat, decoder_output, reduction='mean')
         divergence_loss =  ( (std.pow(2)+mu.pow(2))/2 - torch.log(std) - 1/2 ).sum(1).mean()
 
-        combined_loss = reproduction_loss + 0.001*divergence_loss
+        beta = ((epoch+1)/110)**2
+        beta = 0.0001
+        combined_loss = reproduction_loss + beta*divergence_loss
 
         return combined_loss
 
@@ -106,7 +118,7 @@ batch_size = 100
 input_dim = 784
 hidden_dim = 400
 latent_dim = 400
-epochs = 50
+epochs = 20
 
 # Download MNIST and transofrm to tensors
 mnist_path = "./raw_mnist"
@@ -121,6 +133,39 @@ vae_model = VAEnn(input_dim, hidden_dim, latent_dim, device)
 optimizer = Adam(vae_model.parameters(), lr=1e-5)
 
 train_loss, test_loss = vae_model.trainer(train_loader, test_loader, optimizer, epochs)
+span = torch.arange(start=-10, end=10, step=1)
+span_size = len(span)
+grid = torch.cartesian_prod(span, span)
+
+canvas = -torch.ones([28*span_size,28*span_size])
+for idx, (mu_1, mu_2) in enumerate(grid):
+    image = vae_model.latent_regen([mu_1, mu_2], [1e-8, 1e-8])
+    x_pos, y_pos = 28*(idx//span_size), (28*idx)%(28*span_size)
+    canvas[x_pos:x_pos+28, y_pos:y_pos+28] = image
+
+final_canvas = transformsV2.functional.to_pil_image(canvas)
+
+mu_1_list, mu_2_list, color= [], [], []
+digit_colors = {0: "black", 1: "black", 2: "tab:green", 3: "tab:red", 4: "tab:purple", \
+                5: "tab:brown", 6: "tab:pink", 7:"tab:gray", 8: "tab:olive", 9: "tab:cyan"}
+for sample, label in mnist_train:
+    _, mu, _ = vae_model(sample)
+    mu_1, mu_2 =  mu[0][0].item(), mu[0][1].item()
+    mu_1_list.append(mu_1)
+    mu_2_list.append(mu_2)
+    color.append(digit_colors[label])
+
+
+plt.figure(figsize=(6,6))
+plt.scatter(mu_1_list, mu_2_list, c=color, s=2, alpha=0.5)
+plt.xlabel("mu_1")
+plt.ylabel("mu_2")
+plt.title("VAE Latent Space")
+plt.savefig("bla.pdf")
+
 
 print(test_loss)
 
+digit_count = {}
+for sample, label in mnist_train:
+    digit_count[label] = digit_count.get(label,0) + 1
