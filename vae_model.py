@@ -4,11 +4,9 @@ import torch.distributions as distr
 import torch.utils as utils 
 import torch.optim as optim
 import torch
-
 import numpy as np
-
 from tqdm import tqdm
-
+import logging
 import pickle as pkl
 import gc
 
@@ -22,7 +20,9 @@ class VAE_Model(nn.Module):
                           nn.LeakyReLU(0.2)]             
         for _ in range( hyper['num_conv_hidden'] ):
             encoder_layers.append(nn.Conv1d(hyper['num_conv_kern'], hyper['num_conv_kern'], hyper['size_conv_kern']))
+            encoder_layers.append(nn.BatchNorm1d(hyper['num_conv_kern'], eps=1e-05))
             encoder_layers.append(nn.LeakyReLU(0.2))
+            
         
         # Flatten the convolutional layers and FNN
         encoder_layers.append(nn.Flatten())
@@ -31,6 +31,7 @@ class VAE_Model(nn.Module):
         encoder_layers.append(nn.LeakyReLU(0.2))
         for _ in range( hyper['num_enc_fnn'] ):
             encoder_layers.append(nn.Linear(hyper['size_enc_fnn'], hyper['size_enc_fnn']))
+            encoder_layers.append(nn.BatchNorm1d(hyper['size_enc_fnn'], eps=1e-05))
             encoder_layers.append(nn.LeakyReLU(0.2))
 
         # Define the mapping to latent space
@@ -43,6 +44,7 @@ class VAE_Model(nn.Module):
                           nn.LeakyReLU(0.2)]
         for _ in range( hyper['num_enc_fnn'] ):
             decoder_layers.append(nn.Linear(hyper['size_enc_fnn'], hyper['size_enc_fnn']))
+            encoder_layers.append(nn.BatchNorm1d(hyper['size_enc_fnn'], eps=1e-05))
             decoder_layers.append(nn.LeakyReLU(0.2))
         
         self.decoder = nn.Sequential(*decoder_layers)
@@ -57,6 +59,7 @@ class VAE_Model(nn.Module):
                             nn.LeakyReLU(0.2)]
         for _ in range(hyper['num_pred']):
             predictor_layers.append(nn.Linear(hyper['size_pred'], hyper['size_pred']))
+            predictor_layers.append(nn.BatchNorm1d(hyper['size_pred'], eps=1e-05))
             predictor_layers.append(nn.LeakyReLU(0.2))
         predictor_layers.append(nn.Linear(hyper['size_pred'], 3))
 
@@ -94,6 +97,8 @@ class VAE_Model(nn.Module):
 
     def train_n_tester(self, train_loader, test_loader, optimizer, num_epochs):
 
+        logger = logging.getLogger()
+
         train_loss_hist, test_loss_hist = torch.ones(num_epochs), torch.ones(num_epochs)
         for epoch in range(num_epochs):
 
@@ -110,28 +115,31 @@ class VAE_Model(nn.Module):
             # Check the loss on the train set once the training epoch is done
             self.eval()
             curr_train_loss = 0
+            logger.info(f"Logging training losses for epoch {epoch}")
             for idx, (model_input, predictor_target) in enumerate(train_loader):
                 mu, std, term_gru_output, predictor_output = self.forward(model_input, teacher=False)
-                loss = self.loss_fcn(mu, std, term_gru_output, predictor_output, model_input, predictor_target, epoch)
+                loss = self.loss_fcn(mu, std, term_gru_output, predictor_output, model_input, predictor_target, epoch, logger=logger)
                 curr_train_loss += loss.item()
                 gc.collect()
 
             # Check the loss on the test set once the training epoch is done
             curr_test_loss = 0
+            logger.info(f"Logging testing losses for epoch {epoch}")
             for idx, (model_input, predictor_target) in enumerate(test_loader):
                 mu, std, term_gru_output, predictor_output = self.forward(model_input, teacher=False)
-                loss = self.loss_fcn(mu, std, term_gru_output, predictor_output, model_input, predictor_target, epoch)
+                loss = self.loss_fcn(mu, std, term_gru_output, predictor_output, model_input, predictor_target, epoch, logger=logger)
                 curr_test_loss += loss.item()
                 gc.collect()
 
             train_loss_hist[epoch], test_loss_hist[epoch] = curr_train_loss/len(train_loader), curr_test_loss/len(test_loader)
-            print(f"Finished epoch {epoch}, train loss: {train_loss_hist[epoch]:.3g}, test loss: {test_loss_hist[epoch]:.3g}")
+            logger.info(f"Finished epoch {epoch}, train loss: {train_loss_hist[epoch]:.3g}, test loss: {test_loss_hist[epoch]:.3g}")
+            logger.info("____________________________________________________________-")
 
 
         return train_loss_hist, test_loss_hist
 
 
-    def loss_fcn(self, mu, std, term_gru_output, predictor_output, gru_target, predictor_target, epoch):
+    def loss_fcn(self, mu, std, term_gru_output, predictor_output, gru_target, predictor_target, epoch, logger=False):
 
         # Reconstruction loss
 
@@ -145,30 +153,33 @@ class VAE_Model(nn.Module):
         # Prediction loss
         pred_loss = func.mse_loss(predictor_output,predictor_target)
 
-        print(rec_loss, div_loss, pred_loss)
+        if logger:
+            logger.info(f"Rec: {rec_loss.item():0.3g}, Div: {div_loss.item():.3g}, Pred: {pred_loss.item():0.3g}")
 
         # Annealing coeffs
-        alpha = 1
-        beta = 0.1
+        alpha = max(0.80/(epoch**2+1), 0.01)*0
+        beta = min(0.0001*(epoch**2), 0.1)*0
 
         # Total loss
-        loss = rec_loss + alpha * pred_loss + beta * div_loss
+        loss = (1-alpha-beta)*rec_loss + alpha * pred_loss + beta * div_loss
 
         return loss
     
 if __name__ == "__main__":
 
+    logging.basicConfig(filename="train_n_tester.log", level=logging.INFO, format='%(asctime)-15s %(message)s')
+
     with open("zinc_train_test.pkl", "rb") as file:
         train_set_df, test_set_df = pkl.load(file)
 
-    num_epochs, batch_size, lr = 2, 100, 1e-6
+    num_epochs, batch_size, lr = 10, 250, 5e-5
 
     hyper_ref = {'num_conv_kern': 8, 'size_conv_kern': 8, 'num_conv_hidden': 4,\
                     'size_enc_fnn': 100, 'num_enc_fnn': 1,  'size_latent': 100,\
                     'size_dec_gru': 50, 'num_dec_gru': 4, 'size_pred': 35,\
                     'num_pred': 3}
-    hyper_try = {'num_conv_kern': 8, 'size_conv_kern': 8, 'num_conv_hidden': 4,\
-                    'size_enc_fnn': 100, 'num_enc_fnn': 1,  'size_latent': 100,\
+    hyper_try = {'num_conv_kern': 6, 'size_conv_kern': 8, 'num_conv_hidden': 4,\
+                    'size_enc_fnn': 70, 'num_enc_fnn': 1,  'size_latent': 70,\
                     'size_dec_gru': 50, 'num_dec_gru': 4, 'size_pred': 35,\
                     'num_pred': 3}
     
@@ -191,7 +202,5 @@ if __name__ == "__main__":
     
     optimizer = optim.Adam(vae_model.parameters(), lr=lr)
     train_loss_hist, test_loss_hist = vae_model.train_n_tester(train_loader, test_loader, optimizer, num_epochs)
-
-    bla = 1
 
 
