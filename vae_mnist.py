@@ -7,6 +7,8 @@ from torch.optim import Adam
 from torch import nn
 import torch
 
+import torch.distributions as distr
+
 import matplotlib.pyplot as plt
 
 from PIL import Image
@@ -113,7 +115,10 @@ class VAEnn(nn.Module):
     def loss_fcn(self, model_input, decoder_output, mu, std,  classsif_output, label, epoch):
         model_input_flat = torch.flatten(model_input, start_dim=1)
         reproduction_loss = func.mse_loss(model_input_flat, decoder_output, reduction='mean')
-        divergence_loss =  ( (std.pow(2)+mu.pow(2))/2 - torch.log(std) - 1/2 ).sum(1).mean()
+
+        prior = distr.Normal(mu, std)
+        posterior = distr.Normal(torch.zeros_like(mu), torch.ones_like(std))
+        divergence_loss = distr.kl_divergence(prior, posterior).sum(dim=1).mean()
         classif_loss = func.cross_entropy(classsif_output, label)
 
         beta = 0.001 * min(epoch/2, 10)
@@ -146,7 +151,7 @@ vae_model = VAEnn(input_dim, hidden_dim, latent_dim, device)
 optimizer = Adam(vae_model.parameters(), lr=5e-5)
 
 train_loss, test_loss = vae_model.trainer(train_loader, test_loader, optimizer, epochs)
-span = torch.arange(start=-3, end=3, step=0.2)
+span = torch.arange(start=-5, end=5, step=0.2)
 span_size = len(span)
 grid = torch.cartesian_prod(span, span)
 
@@ -178,8 +183,14 @@ plt.title("VAE Latent Space")
 plt.savefig("bla.pdf")
 
 
-print(test_loss)
 
-digit_count = {}
-for sample, label in mnist_train:
-    digit_count[label] = digit_count.get(label,0) + 1
+label = torch.tensor([8])
+z = torch.randn((1,2), requires_grad=True)
+z_opt = Adam([z], lr=1e-3)
+label_onehot = func.one_hot(label, num_classes=10).to(torch.float32)
+for _ in range(10000):
+    pred = vae_model.classifier(z)
+    loss = func.cross_entropy(pred, label_onehot)
+    loss.backward()
+    z_opt.step()
+
