@@ -121,7 +121,7 @@ class VAEnn(nn.Module):
         divergence_loss = distr.kl_divergence(prior, posterior).sum(dim=1).mean()
         classif_loss = func.cross_entropy(classsif_output, label)
 
-        beta = 0.001 * min(epoch/2, 10)
+        beta = 0.001 * min(epoch/2, 50)
         alpha = 2 * max(1/(0.5*epoch+1), 0.5)
         combined_loss = reproduction_loss + beta*divergence_loss + alpha*classif_loss
 
